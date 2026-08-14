@@ -1,0 +1,26 @@
+# Inputs for the Merton model. See README.md "Data" for provenance and caveats.
+#   E_usd_bn       market value of equity (USD billions)
+#   sigma_E        annualized equity volatility (decimal)
+#   D_usd_bn       face value of total debt, used as the default barrier (USD billions)
+#   rating         S&P long-term issuer credit rating at the data-pull date
+ticker,name,sector,E_usd_bn,sigma_E,D_usd_bn,rating
+MSFT,Microsoft,Technology,3700,0.22,45.0,AAA
+JNJ,Johnson & Johnson,Healthcare,616,0.17,50.8,AAA
+AAPL,Apple,Technology,3300,0.25,98.0,AA+
+GOOGL,Alphabet,Technology,2600,0.26,28.0,AA+
+AMZN,Amazon,Consumer Discretionary,2400,0.28,130.0,AA
+WMT,Walmart,Consumer Staples,780,0.21,60.0,AA
+XOM,Exxon Mobil,Energy,480,0.24,40.0,AA-
+META,Meta Platforms,Technology,1700,0.32,50.0,AA-
+KO,Coca-Cola,Consumer Staples,300,0.16,45.0,A+
+NVDA,NVIDIA,Technology,4000,0.45,10.0,A+
+VZ,Verizon,Telecom,180,0.19,150.0,BBB+
+T,AT&T,Telecom,200,0.20,135.0,BBB
+TSLA,Tesla,Consumer Discretionary,1100,0.55,13.0,BBB
+INTC,Intel,Technology,100,0.45,50.0,BBB
+GM,General Motors,Consumer Discretionary,55,0.35,130.0,BBB
+DAL,Delta Air Lines,Industrials,35,0.40,18.0,BBB
+BA,Boeing,Industrials,166,0.33,54.4,BBB-
+CCL,Carnival,Consumer Discretionary,38,0.50,27.0,BBB-
+F,Ford Motor,Consumer Discretionary,45,0.38,160.0,BBB-
+AAL,American Airlines,Industrials,9,0.60,33.0,B-
