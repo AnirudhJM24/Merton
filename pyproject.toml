@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "merton"
+version = "0.2.0"
+description = "Merton (1974) structural credit risk, estimated and validated on a survivorship-aware US panel"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "requests>=2.31",
+    "matplotlib>=3.7",
+    "scikit-learn>=1.3",
+    "pyarrow>=14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+include = ["merton*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
