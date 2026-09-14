@@ -34,6 +34,7 @@ def synthetic_panel(n_firms=200, n_months=24, signal=1.0, seed=0):
                 "dd": signal * quality[firm] + rng.normal(0, 0.2),
                 "altman_z": signal * 0.5 * quality[firm] + rng.normal(0, 1.0),
                 "default_12m": int(defaults[firm]),
+                "distress_12m": float(defaults[firm]),
             })
     return pd.DataFrame(rows)
 
@@ -41,7 +42,7 @@ def synthetic_panel(n_firms=200, n_months=24, signal=1.0, seed=0):
 def test_auc_is_one_for_a_perfect_score():
     panel = pd.DataFrame({
         "dd": [5.0, 4.0, 1.0, 0.5],
-        "default_12m": [0, 0, 1, 1],
+        "distress_12m": [0, 0, 1, 1],
         "cik": [1, 2, 3, 4],
     })
     assert auc(panel, "dd") == pytest.approx(1.0)
@@ -52,7 +53,7 @@ def test_auc_respects_score_direction():
     """A measure where high means risky must be declared as such."""
     panel = pd.DataFrame({
         "leverage": [0.1, 0.2, 0.9, 0.95],
-        "default_12m": [0, 0, 1, 1],
+        "distress_12m": [0, 0, 1, 1],
         "cik": [1, 2, 3, 4],
     })
     assert auc(panel, "leverage", higher_is_safer=False) == pytest.approx(1.0)
@@ -69,7 +70,7 @@ def test_auc_is_high_when_the_score_carries_signal():
 
 
 def test_auc_is_nan_without_both_classes():
-    panel = pd.DataFrame({"dd": [1.0, 2.0], "default_12m": [0, 0], "cik": [1, 2]})
+    panel = pd.DataFrame({"dd": [1.0, 2.0], "distress_12m": [0, 0], "cik": [1, 2]})
     assert np.isnan(auc(panel, "dd"))
 
 
@@ -91,7 +92,7 @@ def test_bootstrap_clusters_on_firms_not_rows():
 
 def test_decile_table_is_monotone_for_a_real_signal():
     table = decile_table(synthetic_panel(signal=1.0), "dd", n_bins=5)
-    rates = table["default_rate"].tolist()
+    rates = table["event_rate"].tolist()
     assert rates[0] > rates[-1]
     assert table["n"].sum() == 200 * 24
 

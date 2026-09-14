@@ -19,8 +19,15 @@ DISTRESS_DD = 2.0      # a conventional "within two standard deviations" cut
 BENCHMARKS = ("baa_spread", "aaa_spread", "baa_aaa")
 
 
-def aggregate_by_month(panel: pd.DataFrame) -> pd.DataFrame:
-    """Monthly cross-sectional summary of the fitted panel."""
+def aggregate_by_month(panel: pd.DataFrame, min_coverage: float = 0.25) -> pd.DataFrame:
+    """Monthly cross-sectional summary of the fitted panel.
+
+    The opening months of the sample are dropped. Equity volatility needs a
+    year of trailing returns, so the cross-section fills in gradually and the
+    first months are a handful of firms whose median says nothing about the
+    market. ``min_coverage`` is the fraction of the panel's peak firm count a
+    month must reach to be reported.
+    """
     fitted = panel[panel["converged"]].copy()
     grouped = fitted.groupby("date")
     out = pd.DataFrame({
@@ -32,7 +39,7 @@ def aggregate_by_month(panel: pd.DataFrame) -> pd.DataFrame:
         "median_leverage": grouped["leverage"].median(),
         "share_distressed": grouped["dd"].apply(lambda s: float((s < DISTRESS_DD).mean())),
     })
-    return out
+    return out[out["n_firms"] >= min_coverage * out["n_firms"].max()]
 
 
 def with_market_spreads(monthly: pd.DataFrame) -> pd.DataFrame:

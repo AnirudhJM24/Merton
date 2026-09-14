@@ -7,7 +7,7 @@ import pytest
 from merton.data.panel import add_accounting_ratios, add_labels
 from merton.data.prices import realized_volatility, symbol_variants
 from merton.data.sec import as_of, bankruptcy_date, filing_frame
-from merton.data.symbols import name_similarity, normalize_name
+from merton.data.symbols import MATCH_THRESHOLD, name_similarity, normalize_name
 
 
 # --- point-in-time discipline ------------------------------------------------
@@ -110,7 +110,9 @@ def test_filing_frame_survives_missing_items():
 
 def test_labels_are_forward_looking_only():
     panel = pd.DataFrame({
+        "cik": 1,
         "date": pd.to_datetime(["2019-12-31", "2020-01-31", "2020-05-31"]),
+        "close": [10.0, 10.0, 10.0],
         "default_date": [pd.Timestamp("2020-05-26")] * 3,
     })
     labelled = add_labels(panel, horizon_months=12)
@@ -121,14 +123,21 @@ def test_labels_are_forward_looking_only():
 
 def test_labels_ignore_defaults_beyond_the_horizon():
     panel = pd.DataFrame({
+        "cik": 1,
         "date": pd.to_datetime(["2018-01-31"]),
+        "close": [10.0],
         "default_date": [pd.Timestamp("2020-05-26")],
     })
     assert add_labels(panel, horizon_months=12)["default_12m"].tolist() == [0]
 
 
 def test_survivors_are_never_flagged():
-    panel = pd.DataFrame({"date": pd.to_datetime(["2020-01-31"]), "default_date": [pd.NaT]})
+    panel = pd.DataFrame({
+        "cik": 1,
+        "date": pd.to_datetime(["2020-01-31"]),
+        "close": [10.0],
+        "default_date": [pd.NaT],
+    })
     assert add_labels(panel)["default_12m"].tolist() == [0]
 
 
@@ -186,8 +195,34 @@ def test_normalize_name_strips_legal_form(raw, expected):
     assert normalize_name(raw) == expected
 
 
+@pytest.mark.parametrize("sec_name,provider_name", [
+    ("ENERPLUS Corp", "Energous Corporation"),          # matched WATT at 0.75
+    ("SOUTHWESTERN ENERGY CO", "NorthWestern Energy Group"),
+    ("RED HAT INC", "Red Cat Holdings, Inc."),
+    ("HAWAIIAN HOLDINGS INC", "First Hawaiian, Inc."),
+    ("WEB.COM GROUP, INC.", "Weber Inc."),
+    ("CONTANGO OIL & GAS CO", "Contango ORE, Inc."),
+    ("TUCSON ELECTRIC POWER CO", "Korea Electric Power Corporation"),
+])
+def test_near_miss_names_are_rejected(sec_name, provider_name):
+    """Every one of these slipped through at a lower threshold.
+
+    A false match is not a missing row -- it silently attaches one firm's price
+    history to another firm's balance sheet and yields a plausible-looking
+    distance-to-default for a company that does not exist.
+    """
+    assert name_similarity(sec_name, provider_name) < MATCH_THRESHOLD
+
+
 def test_name_similarity_separates_real_matches_from_coincidences():
-    assert name_similarity("RITE AID CORP", "Rite Aid Corporation") > 0.9
+    for sec_name, provider_name in [
+        ("RITE AID CORP", "Rite Aid Corporation"),
+        ("WEWORK INC.", "WeWork Inc."),
+        ("REVLON INC", "Revlon, Inc."),
+        ("PARTY CITY HOLDCO INC.", "Party City Holdco Inc."),
+        ("AMYRIS, INC.", "Amyris, Inc."),
+    ]:
+        assert name_similarity(sec_name, provider_name) >= MATCH_THRESHOLD
     assert name_similarity("BIG LOTS INC", "BIG Shopping Centers Ltd") < 0.72
     assert name_similarity("YELLOW CORP", "Yellow Cake PLC") < 0.72
     assert name_similarity("SUNRUN INC", "Sunrun Neptune Holdings") < 0.72
@@ -289,3 +324,59 @@ def test_tag_ladder_crosses_taxonomies():
         blob, [("dei", "EntityCommonStockSharesOutstanding")])
     assert tag == "EntityCommonStockSharesOutstanding"
     assert frame["val"].tolist() == [1000]
+
+
+# --- the distress label ------------------------------------------------------
+
+def _price_panel(closes, default_date=pd.NaT, start="2020-01-31"):
+    dates = pd.date_range(start, periods=len(closes), freq="ME")
+    return pd.DataFrame({
+        "cik": 1, "date": dates, "close": closes, "default_date": default_date,
+    })
+
+
+def test_distress_flags_an_equity_wipeout():
+    """A 90% fall within the horizon is the event, whether or not a court is involved."""
+    closes = [100.0] * 6 + [5.0] + [5.0] * 11
+    labelled = add_labels(_price_panel(closes), horizon_months=12)
+    assert labelled["distress_12m"].iloc[0] == 1      # the collapse is 6 months ahead
+    assert labelled["distress_12m"].iloc[5] == 1
+
+
+def test_distress_ignores_a_fall_beyond_the_horizon():
+    closes = [100.0] * 20 + [5.0] * 6
+    labelled = add_labels(_price_panel(closes), horizon_months=12)
+    assert labelled["distress_12m"].iloc[0] == 0      # collapse is 20 months out
+
+
+def test_distress_ignores_a_merely_bad_year():
+    closes = [100.0] * 6 + [55.0] * 12
+    labelled = add_labels(_price_panel(closes), horizon_months=12)
+    assert (labelled["distress_12m"].dropna() == 0).all()
+
+
+def test_distress_is_censored_not_zero_at_the_end_of_the_data():
+    """The last year of any firm's data cannot be scored: the event may simply
+    not have happened yet. Calling that a zero would invent healthy firms."""
+    labelled = add_labels(_price_panel([100.0] * 18), horizon_months=12)
+    assert labelled["distress_12m"].iloc[:6].notna().all()
+    assert labelled["distress_12m"].iloc[-11:].isna().all()
+
+
+def test_distress_includes_the_bankruptcy_filing():
+    """A filing counts even when the share price has not yet collapsed."""
+    labelled = add_labels(
+        _price_panel([100.0] * 18, default_date=pd.Timestamp("2020-07-31")),
+        horizon_months=12)
+    assert labelled["distress_12m"].iloc[0] == 1
+    assert labelled["default_12m"].iloc[0] == 1
+
+
+def test_labels_are_computed_per_firm():
+    """One firm's collapse must not label another firm's months."""
+    healthy = _price_panel([100.0] * 18).assign(cik=1)
+    doomed = _price_panel([100.0] * 6 + [2.0] * 12).assign(cik=2)
+    labelled = add_labels(pd.concat([healthy, doomed], ignore_index=True),
+                          horizon_months=12)
+    assert (labelled.loc[labelled["cik"] == 1, "distress_12m"].dropna() == 0).all()
+    assert labelled.loc[labelled["cik"] == 2, "distress_12m"].iloc[0] == 1

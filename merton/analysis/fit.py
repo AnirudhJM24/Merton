@@ -34,13 +34,6 @@ def fit_panel(panel: pd.DataFrame, horizon: float = 1.0) -> pd.DataFrame:
     return out
 
 
-def winsorize(series: pd.Series, lower: float = 0.01, upper: float = 0.99) -> pd.Series:
-    """Clip to quantiles. Distance-to-default has a long right tail on names
-    whose debt is a rounding error, and an unclipped tail distorts every mean."""
-    lo, hi = series.quantile(lower), series.quantile(upper)
-    return series.clip(lo, hi)
-
-
 def summarize_coverage(panel: pd.DataFrame) -> pd.DataFrame:
     """What the panel actually contains, for the record."""
     defaults = panel.loc[panel["default_date"].notna(), "cik"].nunique()

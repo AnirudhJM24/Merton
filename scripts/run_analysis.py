@@ -55,6 +55,29 @@ def md_table(frame: pd.DataFrame, floatfmt: str = "{:.3f}") -> str:
     return "\n".join([header, align, *rows])
 
 
+def format_calibration(table: pd.DataFrame) -> pd.DataFrame:
+    """Render the calibration table so it can actually be read.
+
+    Model PDs in the safe buckets underflow to zero, which makes the ratio
+    column run to 1e36 and tells the reader nothing. Below a floor the
+    probability is reported as effectively zero and the ratio is dropped,
+    because "the model says this cannot happen and it happened" is the finding,
+    not the size of the arithmetic.
+    """
+    floor = 1e-12
+    out = pd.DataFrame({
+        "DD (bucket median)": table["dd_mid"].map("{:.2f}".format),
+        "firm-months": table["n"],
+        "model PD": [("~0" if v < floor else f"{v:.4%}") for v in table["model_pd"]],
+        "realized bankruptcy rate": [f"{v:.4%}" for v in table["empirical_pd"]],
+        "realized / model": [
+            ("n/a" if m < floor else f"{e / m:,.1f}x")
+            for m, e in zip(table["model_pd"], table["empirical_pd"])
+        ],
+    })
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--panel", default=str(DATA_DIR / "panel.parquet"))
@@ -75,16 +98,27 @@ def main() -> None:
     # -- discrimination -------------------------------------------------
     comparison = validation.score_comparison(fitted, SCORES, n_boot=args.boot)
     comparison["score"] = comparison["score"].map(SCORE_LABELS).fillna(comparison["score"])
-    log.info("score comparison:\n%s", comparison.to_string(index=False))
+    log.info("score comparison (distress):\n%s", comparison.to_string(index=False))
 
-    deciles = validation.decile_table(fitted, "dd")
+    bankruptcy = validation.score_comparison(fitted, SCORES, label="default_12m",
+                                             n_boot=args.boot)
+    bankruptcy["score"] = bankruptcy["score"].map(SCORE_LABELS).fillna(bankruptcy["score"])
+    log.info("score comparison (bankruptcy):\n%s", bankruptcy.to_string(index=False))
+
+    deciles = validation.decile_table(fitted, "dd", label="default_12m")
+    deciles_distress = validation.decile_table(fitted, "dd")
     calibration = validation.empirical_vs_model_pd(fitted)
 
-    combined = validation.logistic_benchmark(
-        fitted, ["dd", "altman_z", "leverage_book", "log_assets"])
-    dd_only = validation.logistic_benchmark(fitted, ["dd"])
-    accounting_only = validation.logistic_benchmark(
-        fitted, ["altman_z", "leverage_book", "log_assets"])
+    accounting = ["altman_z", "leverage_book", "log_assets"]
+    benchmarks = pd.DataFrame([
+        {"outcome": outcome, "model": name, **validation.logistic_benchmark(
+            fitted, feats, label=label)}
+        for outcome, label in (("bankruptcy", "default_12m"), ("distress", "distress_12m"))
+        for name, feats in (("distance-to-default alone", ["dd"]),
+                            ("accounting ratios only", accounting),
+                            ("both", ["dd"] + accounting))
+    ])[["outcome", "model", "auc", "n"]]
+    log.info("logistic benchmarks:\n%s", benchmarks.to_string(index=False))
 
     # -- credit cycle ---------------------------------------------------
     monthly = timeseries.with_market_spreads(timeseries.aggregate_by_month(fitted))
@@ -93,7 +127,12 @@ def main() -> None:
 
     # -- figures --------------------------------------------------------
     figures.roc_figure(fitted, SCORES, SCORE_LABELS, FIG_DIR / "roc.png")
-    figures.decile_figure(fitted, FIG_DIR / "decile_default_rate.png")
+    figures.roc_figure(fitted, SCORES, SCORE_LABELS, FIG_DIR / "roc_bankruptcy.png",
+                       label="default_12m",
+                       title="Predicting a bankruptcy filing 12 months ahead")
+    figures.decile_figure(fitted, FIG_DIR / "decile_default_rate.png",
+                          label="default_12m",
+                          title="Realized bankruptcy rate by distance-to-default decile")
     figures.calibration_figure(fitted, FIG_DIR / "pd_calibration.png")
     figures.event_study_figure(fitted, FIG_DIR / "event_study.png")
     figures.credit_cycle_figure(monthly, FIG_DIR / "credit_cycle.png")
@@ -113,43 +152,71 @@ def main() -> None:
         "",
         md_table(coverage),
         "",
-        "## 2. Does distance-to-default predict bankruptcy?",
+        "## 2. Does distance-to-default predict trouble?",
+        "",
+        "Two outcomes are scored, and they do not agree about what the model is "
+        "worth. **Bankruptcy** is an Item 1.03 filing within twelve months: the "
+        "event the model is actually about, and a scarce one here for the reason "
+        "given in section 1. **Severe distress** adds a 90% loss of equity value, "
+        "which is far more common and so far better powered. Confidence intervals "
+        "are bootstrapped over firms rather than rows, because one firm contributes "
+        "a hundred near-identical months and resampling rows would claim a "
+        "precision the data does not have.",
+        "",
+        "### Bankruptcy filing within 12 months",
+        "",
+        md_table(bankruptcy),
+        "",
+        "![ROC curves, bankruptcy](figures/roc_bankruptcy.png)",
+        "",
+        "The AUCs printed on the chart are the common-sample figures, since all "
+        "four curves have to be drawn on the same rows to be comparable; the "
+        "table above gives each score on its own sample as well.",
+        "",
+        "Realized bankruptcy rate by distance-to-default decile:",
+        "",
+        md_table(deciles[["bucket", "n", "events", "event_rate_pct",
+                          "score_low", "score_high"]], "{:.2f}"),
+        "",
+        "![Bankruptcy rate by decile](figures/decile_default_rate.png)",
+        "",
+        "### Severe distress within 12 months",
         "",
         f"Common sample: {comparison.attrs['n_obs']:,} firm-months, "
-        f"{comparison.attrs['n_defaults']:,} of them followed by a bankruptcy filing "
-        "within twelve months. Confidence intervals are bootstrapped over firms, "
-        "not rows.",
+        f"{comparison.attrs['n_defaults']:,} of them followed by distress.",
         "",
         md_table(comparison),
         "",
         "![ROC curves](figures/roc.png)",
         "",
-        "### Realized default rate by distance-to-default decile",
+        "Realized distress rate by distance-to-default decile:",
         "",
-        md_table(deciles[["bucket", "n", "defaults", "default_rate_pct",
-                          "score_low", "score_high"]], "{:.2f}"),
-        "",
-        "![Default rate by decile](figures/decile_default_rate.png)",
+        md_table(deciles_distress[["bucket", "n", "events", "event_rate_pct",
+                                   "score_low", "score_high"]], "{:.2f}"),
         "",
         "### Does the structural measure add anything to accounting ratios?",
         "",
-        "Out-of-sample AUC from logistic models, five folds split by firm so that no "
-        "firm appears in both training and test:",
+        "Out-of-sample AUC from logistic models, five folds split by firm so that "
+        "no firm appears in both training and test:",
         "",
-        md_table(pd.DataFrame([
-            {"model": "Distance-to-default alone", "auc": dd_only["auc"], "n": dd_only["n"]},
-            {"model": "Accounting ratios only", "auc": accounting_only["auc"],
-             "n": accounting_only["n"]},
-            {"model": "Both", "auc": combined["auc"], "n": combined["n"]},
-        ])),
+        md_table(benchmarks),
         "",
         "## 3. Are the probabilities themselves any good?",
         "",
         "Model risk-neutral PD against the frequency actually realized, by "
         "distance-to-default bucket:",
         "",
-        md_table(calibration[["bucket", "n", "dd_mid", "model_pd", "empirical_pd", "ratio"]],
-                 "{:.6f}"),
+        md_table(format_calibration(calibration)),
+        "",
+        "Read the two ends separately. In the riskiest bucket the model is too "
+        "pessimistic: it prices a one-in-seven chance of default against a realized "
+        "rate near one in a hundred. Everywhere above roughly three standard "
+        "deviations it is too optimistic, and not by a margin -- it puts the "
+        "probability at zero to machine precision for firms that went on to file "
+        "anyway. This is the credit spread puzzle: a single-factor Merton model at a "
+        "one-year horizon cannot generate default risk for a healthy firm, because "
+        "a diffusion has to travel too far in twelve months. The rankings are the "
+        "output worth reading; the levels are not.",
         "",
         "![Model PD vs realized frequency](figures/pd_calibration.png)",
         "",
@@ -174,6 +241,11 @@ def main() -> None:
         f"Spearman rank correlation between model distance-to-default and S&P issuer "
         f"rating across the {len(ratings)} hand-built names: "
         f"**{xs.rating_rank_correlation(ratings):.2f}**.",
+        "",
+        f"What drives that ordering is leverage, not volatility: distance-to-default "
+        f"correlates {xs.rank_correlation(ratings, 'leverage'):+.2f} with asset "
+        f"leverage and {xs.rank_correlation(ratings, 'sigma_V'):+.2f} with asset "
+        f"volatility across the same names.",
         "",
         xs.render_table(ratings, markdown=True),
         "",

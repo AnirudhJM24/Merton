@@ -129,28 +129,129 @@ def credit_metrics(V, sigma_V, D, r, T=1.0) -> MertonSolution:
     )
 
 
-def solve_panel(E, sigma_E, D, r, T=1.0):
-    """Solve row-wise over arrays, returning a dict of arrays.
+def _newton_panel(E, sigma_E, D, r, T, tol=1e-10, max_iter=60):
+    """Vectorized Newton on the two-equation system, with an analytic Jacobian.
 
-    Rows that fail to converge or carry non-positive inputs come back as NaN and
-    are flagged in ``converged`` rather than raising, so one bad firm-month does
-    not abort a panel of 100k.
+    Solving row by row with a generic root finder costs a millisecond or two
+    each, which is minutes over a panel of this size. Newton in log space with
+    the exact Jacobian converges in a handful of iterations for every row at
+    once.
+
+    The Jacobian simplifies sharply because of the Black-Scholes identity
+    V*phi(d1) == D*e^{-rT}*phi(d2): the two vega terms in the first equation
+    cancel against each other, leaving d(f1)/d(log V) = V*Phi(d1) exactly.
+    """
+    sqrt_T = math.sqrt(T)
+    K = D * np.exp(-r * T)
+
+    u = np.log(E + K)                       # assets >= equity + discounted debt
+    w = np.log(np.clip(sigma_E * E / np.exp(u), 1e-8, 5.0))
+
+    active = np.ones(len(E), dtype=bool)
+    for _ in range(max_iter):
+        V, sigma_V = np.exp(u), np.exp(w)
+        A = np.log(V / D) + r * T
+        d1 = (A + 0.5 * sigma_V ** 2 * T) / (sigma_V * sqrt_T)
+        d2 = d1 - sigma_V * sqrt_T
+        Nd1, nd1 = norm.cdf(d1), norm.pdf(d1)
+
+        f1 = (V * Nd1 - K * norm.cdf(d2) - E) / E
+        f2 = (Nd1 * sigma_V * V - sigma_E * E) / (sigma_E * E)
+
+        done = np.maximum(np.abs(f1), np.abs(f2)) < tol
+        active = active & ~done
+        if not active.any():
+            break
+
+        dd1_dw = (0.5 * sigma_V ** 2 * T - A) / (sigma_V * sqrt_T)
+
+        j11 = V * Nd1 / E
+        j12 = V * nd1 * sigma_V * sqrt_T / E
+        j21 = (Nd1 * sigma_V * V + nd1 * V / sqrt_T) / (sigma_E * E)
+        j22 = (Nd1 * sigma_V * V + nd1 * dd1_dw * sigma_V * V) / (sigma_E * E)
+
+        det = j11 * j22 - j12 * j21
+        det = np.where(np.abs(det) < 1e-14, np.nan, det)
+        step_u = (j22 * f1 - j12 * f2) / det
+        step_w = (-j21 * f1 + j11 * f2) / det
+
+        # Cap the step so a bad iterate cannot throw the solve into a region
+        # where the volatility underflows and the residuals stop being finite.
+        step_u = np.clip(step_u, -1.0, 1.0)
+        step_w = np.clip(step_w, -1.0, 1.0)
+
+        u = np.where(active, u - step_u, u)
+        w = np.where(active, w - step_w, w)
+        u = np.where(np.isfinite(u), u, np.log(E + K))
+        w = np.clip(w, np.log(1e-8), np.log(5.0))
+
+    V, sigma_V = np.exp(u), np.exp(w)
+    d1, d2 = d1_d2(V, sigma_V, D, r, T)
+    f1 = (V * norm.cdf(d1) - K * norm.cdf(d2) - E) / E
+    f2 = (norm.cdf(d1) * sigma_V * V - sigma_E * E) / (sigma_E * E)
+    converged = np.maximum(np.abs(f1), np.abs(f2)) < 1e-8
+    return V, sigma_V, converged
+
+
+def _metrics_panel(V, sigma_V, D, r, T):
+    """Credit measures for whole arrays at once."""
+    d1, d2 = d1_d2(V, sigma_V, D, r, T)
+    discounted = D * np.exp(-r * T)
+    equity = V * norm.cdf(d1) - discounted * norm.cdf(d2)
+    debt_value = V - equity
+    return {
+        "V": V,
+        "sigma_V": sigma_V,
+        "dd": d2,
+        "pd": norm.cdf(-d2),
+        "spread": -np.log(debt_value / D) / T - r,
+        "leverage": discounted / V,
+    }
+
+
+def solve_panel(E, sigma_E, D, r, T=1.0):
+    """Solve for (V, sigma_V) row-wise over arrays, returning a dict of arrays.
+
+    Runs the vectorized Newton solve first and retries only the rows it could
+    not settle with the general-purpose solver, so a difficult handful does not
+    set the pace for the whole panel. Rows with unusable inputs, and rows
+    neither method can solve, come back as NaN and are flagged in
+    ``converged`` rather than silently dropped -- the coverage of the solve is
+    itself something worth reporting.
     """
     E, sigma_E, D, r = (np.asarray(a, dtype=float) for a in (E, sigma_E, D, r))
     n = len(E)
-    out = {k: np.full(n, np.nan) for k in
-           ("V", "sigma_V", "dd", "pd", "spread", "leverage")}
+    keys = ("V", "sigma_V", "dd", "pd", "spread", "leverage")
+    out = {k: np.full(n, np.nan) for k in keys}
     converged = np.zeros(n, dtype=bool)
 
-    for i in range(n):
+    usable = (E > 0) & (sigma_E > 0) & (D > 0) & np.isfinite(E) \
+        & np.isfinite(sigma_E) & np.isfinite(D) & np.isfinite(r)
+    if not usable.any():
+        out["converged"] = converged
+        return out
+
+    idx = np.flatnonzero(usable)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        V, sigma_V, ok = _newton_panel(E[idx], sigma_E[idx], D[idx], r[idx], T)
+
+    # Rows Newton could not settle get the general-purpose solver, one at a
+    # time. There are usually very few of them.
+    for local in np.flatnonzero(~ok):
+        row = idx[local]
         try:
-            V, sigma_V = solve_assets(E[i], sigma_E[i], D[i], r[i], T)
-            m = credit_metrics(V, sigma_V, D[i], r[i], T)
+            V[local], sigma_V[local] = solve_assets(
+                E[row], sigma_E[row], D[row], r[row], T)
+            ok[local] = True
         except (ValueError, RuntimeError, FloatingPointError):
             continue
-        for k, v in m.as_dict().items():
-            out[k][i] = v
-        converged[i] = True
+
+    solved = idx[ok]
+    if len(solved):
+        metrics = _metrics_panel(V[ok], sigma_V[ok], D[solved], r[solved], T)
+        for key, values in metrics.items():
+            out[key][solved] = values
+        converged[solved] = True
 
     out["converged"] = converged
     return out

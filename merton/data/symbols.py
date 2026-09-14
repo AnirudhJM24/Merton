@@ -23,7 +23,13 @@ from merton.data.http import session
 log = logging.getLogger(__name__)
 
 SEARCH_URL = "https://stockanalysis.com/api/search?q={query}"
-MATCH_THRESHOLD = 0.72
+# Deliberately severe. At 0.72 this matched ENERPLUS to Energous (WATT),
+# SOUTHWESTERN ENERGY to NorthWestern (NWE), RED HAT to Red Cat (RCAT) and
+# HAWAIIAN HOLDINGS to First Hawaiian (FHB) -- each of which stapled one firm's
+# balance sheet to another firm's share price and produced a row that looked
+# entirely reasonable. A miss costs one firm; a false match corrupts the panel
+# silently, so the threshold sits where only near-identical names survive.
+MATCH_THRESHOLD = 0.95
 
 # Legal-form and filer-index noise that carries no identifying information.
 _NOISE = re.compile(

@@ -1,0 +1,24 @@
+{
+  "generated": "2026-09-14T20:51:56.912798+00:00",
+  "panel_start": "2016-09-30",
+  "target_firms": 1800,
+  "candidate_pool": 7200,
+  "candidates_examined": 5197,
+  "firms_built": 1804,
+  "outcomes": {
+    "financial": 1509,
+    "cached": 1744,
+    "cached_empty": 696,
+    "no_ticker": 1151,
+    "no_rows": 37,
+    "built": 60
+  },
+  "outcome_meanings": {
+    "built": "usable monthly rows produced",
+    "financial": "SIC 6000-6799, excluded by design",
+    "no_ticker": "no ticker in SEC's file and no confident name match at the price source",
+    "no_rows": "resolved, but no month had equity value, volatility and debt together",
+    "no_profile": "SEC submissions unavailable",
+    "cached": "already built by an earlier run"
+  }
+}

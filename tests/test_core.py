@@ -138,3 +138,53 @@ def test_panel_matches_scalar_path():
         V, sigma_V = solve_assets(E[i], sigma_E[i], D[i], r[i], T)
         assert out["V"][i] == pytest.approx(V, rel=1e-9)
         assert out["dd"][i] == pytest.approx(credit_metrics(V, sigma_V, D[i], r[i], T).dd)
+
+
+def test_vectorized_solver_agrees_with_the_reference_solver():
+    """The fast path must give the same answer as the general-purpose one.
+
+    A hand-rolled Newton iteration with an analytic Jacobian is exactly the
+    kind of optimization that can be subtly wrong and still look plausible, so
+    it is pinned against scipy across the whole range of leverage and
+    volatility the panel contains.
+    """
+    rng = np.random.default_rng(7)
+    n = 400
+    V_true = 10 ** rng.uniform(8, 12, n)
+    sigma_true = rng.uniform(0.08, 1.2, n)
+    D = V_true * rng.uniform(0.02, 0.95, n)
+    r = rng.uniform(0.0, 0.06, n)
+
+    E = np.empty(n)
+    sigma_E = np.empty(n)
+    for i in range(n):
+        E[i], sigma_E[i] = equity_from_assets(V_true[i], sigma_true[i], D[i], r[i], T)
+
+    out = solve_panel(E, sigma_E, D, r, T)
+    assert out["converged"].all()
+    np.testing.assert_allclose(out["V"], V_true, rtol=1e-5)
+    np.testing.assert_allclose(out["sigma_V"], sigma_true, rtol=1e-5)
+
+    for i in range(0, n, 37):
+        V_ref, sigma_ref = solve_assets(E[i], sigma_E[i], D[i], r[i], T)
+        assert out["V"][i] == pytest.approx(V_ref, rel=1e-6)
+        assert out["sigma_V"][i] == pytest.approx(sigma_ref, rel=1e-6)
+
+
+def test_vectorized_solver_is_fast_enough_for_a_panel():
+    """The whole point of the fast path: a full panel in about a second."""
+    import time
+
+    rng = np.random.default_rng(3)
+    n = 50_000
+    E = 10 ** rng.uniform(8, 12, n)
+    sigma_E = rng.uniform(0.15, 1.0, n)
+    D = E * rng.uniform(0.05, 4.0, n)
+    r = np.full(n, 0.04)
+
+    started = time.perf_counter()
+    out = solve_panel(E, sigma_E, D, r, T)
+    elapsed = time.perf_counter() - started
+
+    assert out["converged"].mean() > 0.99
+    assert elapsed < 30, f"panel solve took {elapsed:.1f}s"

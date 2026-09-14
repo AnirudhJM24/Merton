@@ -15,7 +15,9 @@ from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-LABEL = "default_12m"
+# The powered outcome. ``default_12m`` is the cleaner event but too scarce to
+# support a confident AUC -- see merton/data/panel.py for why.
+LABEL = "distress_12m"
 
 
 def _clean(panel: pd.DataFrame, score: str, label: str = LABEL):
@@ -49,26 +51,40 @@ def bootstrap_auc(panel: pd.DataFrame, score: str, label: str = LABEL,
     Firm-months are strongly autocorrelated -- one firm contributes a hundred
     near-identical rows -- so resampling rows would report a precision the data
     does not have. Clustering the bootstrap on the firm is the honest version.
+
+    Each firm's rows are pre-extracted as arrays once, so a replication is a
+    couple of ``np.concatenate`` calls rather than a pandas concat over
+    thousands of frames.
     """
     frame = panel[[score, label, "cik"]].replace([np.inf, -np.inf], np.nan).dropna()
     if frame.empty or frame[label].nunique() < 2:
         return float("nan"), float("nan")
 
-    rng = np.random.default_rng(seed)
-    firms = frame["cik"].unique()
-    by_firm = {cik: part for cik, part in frame.groupby("cik")}
+    sign = -1.0 if higher_is_safer else 1.0
+    order = np.argsort(frame["cik"].to_numpy(), kind="stable")
+    ciks = frame["cik"].to_numpy()[order]
+    scores = sign * frame[score].to_numpy(dtype=float)[order]
+    labels = frame[label].to_numpy(dtype=float)[order]
 
-    scores = []
+    # Contiguous slice per firm, so a replication indexes rather than groups.
+    boundaries = np.flatnonzero(np.diff(ciks)) + 1
+    score_chunks = np.split(scores, boundaries)
+    label_chunks = np.split(labels, boundaries)
+
+    rng = np.random.default_rng(seed)
+    n_firms = len(score_chunks)
+    draws = []
     for _ in range(n_boot):
-        drawn = rng.choice(firms, size=len(firms), replace=True)
-        sample = pd.concat([by_firm[c] for c in drawn], ignore_index=True)
-        if sample[label].nunique() < 2:
+        picks = rng.integers(0, n_firms, n_firms)
+        y = np.concatenate([label_chunks[i] for i in picks])
+        if len(np.unique(y)) < 2:
             continue
-        s = sample[score].to_numpy()
-        scores.append(roc_auc_score(sample[label].to_numpy(), -s if higher_is_safer else s))
-    if not scores:
+        x = np.concatenate([score_chunks[i] for i in picks])
+        draws.append(roc_auc_score(y, x))
+
+    if not draws:
         return float("nan"), float("nan")
-    return float(np.percentile(scores, 2.5)), float(np.percentile(scores, 97.5))
+    return float(np.percentile(draws, 2.5)), float(np.percentile(draws, 97.5))
 
 
 def roc_points(panel: pd.DataFrame, score: str, label: str = LABEL,
@@ -127,30 +143,35 @@ def decile_table(panel: pd.DataFrame, score: str = "dd", label: str = LABEL,
     frame["bucket"] = pd.qcut(frame[score], n_bins, labels=False, duplicates="drop")
     table = frame.groupby("bucket").agg(
         n=(label, "size"),
-        defaults=(label, "sum"),
-        default_rate=(label, "mean"),
+        events=(label, "sum"),
+        event_rate=(label, "mean"),
         score_low=(score, "min"),
         score_high=(score, "max"),
     ).reset_index()
-    table["default_rate_pct"] = 100 * table["default_rate"]
+    table["event_rate_pct"] = 100 * table["event_rate"]
     return table
 
 
-def empirical_vs_model_pd(panel: pd.DataFrame, n_bins: int = 12) -> pd.DataFrame:
-    """Compare the model's risk-neutral PD with the realized default frequency.
+def empirical_vs_model_pd(panel: pd.DataFrame, n_bins: int = 12,
+                          label: str = "default_12m") -> pd.DataFrame:
+    """Compare the model's risk-neutral PD with the realized event frequency.
 
     This is the credit-spread puzzle in table form. Grouping by distance-to-
     default, each bucket's mean model PD sits next to the fraction of those
-    firm-months that actually defaulted within a year.
+    firm-months in which the event actually followed within a year.
+
+    The default label is the bankruptcy filing rather than the broader distress
+    event, because the model's PD is a probability of default specifically.
+    Scoring it against a wider event would flatter the comparison.
     """
-    cols = ["dd", "pd", LABEL]
+    cols = ["dd", "pd", label]
     frame = panel[cols].replace([np.inf, -np.inf], np.nan).dropna().copy()
     frame["bucket"] = pd.qcut(frame["dd"], n_bins, labels=False, duplicates="drop")
     table = frame.groupby("bucket").agg(
         n=("dd", "size"),
         dd_mid=("dd", "median"),
         model_pd=("pd", "mean"),
-        empirical_pd=(LABEL, "mean"),
+        empirical_pd=(label, "mean"),
     ).reset_index()
     table["ratio"] = table["empirical_pd"] / table["model_pd"].replace(0, np.nan)
     return table

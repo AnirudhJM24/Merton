@@ -198,15 +198,60 @@ def firm_rows(profile: dict, ticker: str, dates: pd.DatetimeIndex) -> pd.DataFra
     return frame.reset_index(names="date")
 
 
+WIPEOUT_RATIO = 0.10     # a 90% loss of equity value
+
+
 def add_labels(panel: pd.DataFrame, horizon_months: int = DEFAULT_HORIZON_MONTHS) -> pd.DataFrame:
-    """Flag each row with whether the firm filed for bankruptcy within the horizon."""
-    panel = panel.copy()
+    """Attach the two forward-looking outcome labels.
+
+    ``default_{h}m`` is the clean one: did the firm file an 8-K under Item 1.03
+    within the horizon? It is also the scarce one. Firms that reorganize and
+    relist keep filing with the SEC but their pre-filing share price is not
+    available from free sources -- the surviving ticker's history begins at
+    emergence -- so most large Chapter 11 cases contribute a default date with
+    no equity data behind it. What remains is too few events to support a
+    confident AUC.
+
+    ``distress_{h}m`` is the powered one: the firm either filed, or its equity
+    lost 90% of its value within the horizon. An equity wipeout is the event a
+    structural model is actually about -- asset value falling through the debt
+    barrier -- and unlike the filing it is observable for every firm in the
+    panel.
+
+    Both are genuinely forward-looking, and rows whose forward window runs off
+    the end of the data are left as NaN rather than quietly labelled zero.
+    """
+    panel = panel.sort_values(["cik", "date"]).copy()
     horizon = pd.DateOffset(months=horizon_months)
     default_date = pd.to_datetime(panel["default_date"])
-    ahead = default_date.notna() & (default_date > panel["date"]) \
-        & (default_date <= panel["date"] + horizon)
-    panel[f"default_{horizon_months}m"] = ahead.astype(int)
+
+    filed_ahead = (default_date.notna() & (default_date > panel["date"])
+                   & (default_date <= panel["date"] + horizon))
+    panel[f"default_{horizon_months}m"] = filed_ahead.astype(int)
     panel["months_to_default"] = ((default_date - panel["date"]).dt.days / 30.44).round(1)
+
+    # Forward minimum price over the horizon, firm by firm. Reversing the
+    # series turns a forward-looking window into a trailing one, which is the
+    # only way to keep it strictly out-of-sample per row.
+    def forward_min(group):
+        reversed_close = group[::-1]
+        return (reversed_close.rolling(horizon_months, min_periods=1).min()
+                .shift(1)[::-1])
+
+    grouped = panel.groupby("cik", group_keys=False)["close"]
+    panel["forward_min_close"] = grouped.apply(forward_min)
+    panel["forward_ratio"] = panel["forward_min_close"] / panel["close"]
+
+    wipeout = panel["forward_ratio"] <= WIPEOUT_RATIO
+    event = (filed_ahead | wipeout).astype(float)
+
+    # Right censoring: a row whose forward window extends past the firm's last
+    # observation cannot be scored zero, because the event may simply not have
+    # been seen yet. Rows where the event did happen are always usable.
+    last_seen = panel.groupby("cik")["date"].transform("max")
+    complete_window = (panel["date"] + horizon) <= last_seen
+    panel[f"distress_{horizon_months}m"] = event.where(complete_window | event.astype(bool))
+
     return panel
 
 

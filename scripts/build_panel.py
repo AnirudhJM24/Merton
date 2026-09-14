@@ -10,6 +10,7 @@ costs nothing for firms already done.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import threading
@@ -103,7 +104,10 @@ def build(n_firms: int, start: str, skip_financials: bool = True,
     counts: Counter = Counter()
     lock = threading.Lock()
     stop = threading.Event()
-    state = {"built": len(list(SHARD_DIR.glob("*.parquet"))), "done": 0}
+    # Counts from zero: firms already on disk come back through the loop as
+    # "cached" and are counted there. Seeding this with the existing shard
+    # count would double-count them and stop the walk early.
+    state = {"built": 0, "done": 0}
     started = time.time()
 
     def worker(item):
@@ -136,6 +140,27 @@ def build(n_firms: int, start: str, skip_financials: bool = True,
                 profiles.append(result[1])
 
     log.info("candidate outcomes: %s", dict(counts))
+
+    # Persist why candidates dropped out. How a sample was selected is part of
+    # the result, and "20% of candidates were lost" is only defensible if the
+    # reasons are on the record.
+    (DATA_DIR / "build_report.json").write_text(json.dumps({
+        "generated": pd.Timestamp.now("UTC").isoformat(),
+        "panel_start": start,
+        "target_firms": n_firms,
+        "candidate_pool": len(universe),
+        "candidates_examined": state["done"],
+        "firms_built": state["built"],
+        "outcomes": dict(counts),
+        "outcome_meanings": {
+            "built": "usable monthly rows produced",
+            "financial": "SIC 6000-6799, excluded by design",
+            "no_ticker": "no ticker in SEC's file and no confident name match at the price source",
+            "no_rows": "resolved, but no month had equity value, volatility and debt together",
+            "no_profile": "SEC submissions unavailable",
+            "cached": "already built by an earlier run",
+        },
+    }, indent=2))
     return assemble(profiles)
 
 
@@ -147,6 +172,20 @@ def assemble(profiles: list[dict] | None = None) -> pd.DataFrame:
         raise RuntimeError("no firm data was built")
 
     frame = pd.concat((pd.read_parquet(s) for s in shards), ignore_index=True)
+
+    # Which XBRL tag supplied each quantity is worth keeping -- filers are
+    # inconsistent, and a reviewer should be able to check where a number came
+    # from -- but it is a per-firm fact, not a per-month one. Storing the same
+    # 500-character string on every row of a firm inflates the panel for
+    # nothing, so it moves to its own file.
+    if "tags_used" in frame:
+        (frame.groupby("cik")
+              .agg(ticker=("ticker", "first"), name=("name", "first"),
+                   tags_used=("tags_used", "first"))
+              .reset_index()
+              .to_csv(DATA_DIR / "tag_usage.csv", index=False))
+        frame = frame.drop(columns=["tags_used"])
+
     frame = panel_mod.add_labels(frame)
     frame = panel_mod.add_accounting_ratios(frame)
     frame = panel_mod.attach_rates(frame)
@@ -180,7 +219,7 @@ def main() -> None:
 
     frame = assemble() if args.assemble_only else build(
         args.firms, args.start, workers=args.workers)
-    frame.to_parquet(args.out, index=False)
+    frame.to_parquet(args.out, index=False, compression="zstd")
     log.info("wrote %s: %d rows, %d firms, %d default-flagged rows",
              args.out, len(frame), frame["cik"].nunique(),
              int(frame["default_12m"].sum()))
