@@ -22,6 +22,7 @@ Full output: **[results.md](results.md)**.
 | AUC, equity volatility / Altman Z / book leverage, same task | 0.77 / 0.76 / 0.62 |
 | Out-of-sample AUC: DD alone / accounting ratios / both | 0.82 / 0.76 / 0.83 |
 | Correlation, Δ median distance-to-default vs Δ Baa spread | −0.67 |
+| Bankruptcy rate, riskiest vs safest DD decile | 0.94% vs 0.01% |
 | Rank correlation, distance-to-default vs S&P rating (20 names) | 0.94 |
 
 Three findings are worth more than the headline number.
@@ -30,9 +31,10 @@ Three findings are worth more than the headline number.
 AUC 0.82, against 0.62 for book leverage and 0.76 for the Altman Z-score. Out of
 sample it beats a full set of accounting ratios on its own (0.82 against 0.76), and
 adding the ratios to it buys almost nothing (0.83) — the structural measure is doing
-the work. Firms that went on to file sat at a median distance-to-default of 0.8 in
-the quarter of filing, against 5.6 for firms that never filed, and the decline is
-already visible three years out.
+the work. The realized bankruptcy rate falls monotonically across distance-to-default
+deciles, from 0.94% in the riskiest tenth to 0.01% in the safest. Firms that went on
+to file sat at a median distance-to-default of 0.8 in the quarter of filing, against
+5.6 for firms that never filed, and the decline is already visible three years out.
 
 **On a broader distress definition, the model is beaten by the simplest possible
 benchmark.** If the event is "the equity lost 90% of its value," trailing equity

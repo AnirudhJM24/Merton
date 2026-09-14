@@ -116,21 +116,38 @@ def decile_figure(panel: pd.DataFrame, out: Path, score: str = "dd", n_bins: int
 
 def calibration_figure(panel: pd.DataFrame, out: Path, n_bins: int = 12,
                        label: str = "default_12m") -> Path:
-    """Model risk-neutral PD against the realized frequency, by DD bucket."""
+    """Model risk-neutral PD against the realized frequency, by DD bucket.
+
+    Both series are drawn on a log axis against a floor. The model's PD really
+    does underflow to zero in the safe buckets, so plotting it at the floor is
+    honest. A realized frequency of zero is not the same statement -- it means
+    no bankruptcy was observed among those firm-months, which given the sample
+    size is an upper bound rather than a measurement -- so those buckets are
+    drawn as hollow markers off the line instead of being joined into it.
+    """
     table = empirical_vs_model_pd(panel, n_bins=n_bins, label=label)
-    table = table[(table["model_pd"] > 0) | (table["empirical_pd"] > 0)]
     floor = 1e-10
 
     fig, ax = _figure()
     ax.plot(table["dd_mid"], table["model_pd"].clip(lower=floor), color=SERIES[0],
             linewidth=2, marker="o", markersize=6, label="Model risk-neutral PD")
-    ax.plot(table["dd_mid"], table["empirical_pd"].clip(lower=floor), color=SERIES[1],
+
+    observed = table[table["empirical_pd"] > 0]
+    ax.plot(observed["dd_mid"], observed["empirical_pd"], color=SERIES[1],
             linewidth=2, marker="s", markersize=6, label="Realized bankruptcy frequency")
 
+    none_seen = table[table["empirical_pd"] <= 0]
+    if not none_seen.empty:
+        ax.plot(none_seen["dd_mid"], np.full(len(none_seen), floor), linestyle="none",
+                marker="v", markersize=8, markerfacecolor="none",
+                markeredgecolor=SERIES[1], markeredgewidth=1.5,
+                label="No bankruptcy observed in bucket")
+
     ax.set_yscale("log")
+    ax.set_ylim(floor / 3, 1)
     _style(ax, "Model probabilities against what actually happened",
            "Distance to default (bucket median)", "12-month default probability")
-    legend = ax.legend(loc="upper right", frameon=False, fontsize=9)
+    legend = ax.legend(loc="lower left", frameon=False, fontsize=9)
     for text in legend.get_texts():
         text.set_color(INK)
     return _save(fig, out)
