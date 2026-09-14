@@ -197,3 +197,95 @@ def test_short_prefix_does_not_count_as_a_match():
     """The bar to clear: one firm's prices must never land on another's books."""
     assert name_similarity("DELTA APPAREL", "Delta Air Lines") < 0.72
     assert name_similarity("WEWORK", "WeWork Inc.") > 0.9
+
+
+# --- companyfacts extraction -------------------------------------------------
+
+def _blob(tag, unit, rows, taxonomy="us-gaap"):
+    return {"facts": {taxonomy: {tag: {"units": {unit: rows}}}}}
+
+
+def test_facts_concept_keeps_instant_facts():
+    from merton.data.sec import facts_concept
+
+    blob = _blob("Assets", "USD", [
+        {"end": "2023-03-31", "filed": "2023-05-01", "val": 100},
+        {"end": "2023-06-30", "filed": "2023-08-01", "val": 110},
+    ])
+    frame = facts_concept(blob, "Assets")
+    assert len(frame) == 2
+    assert frame["val"].tolist() == [100, 110]
+
+
+def test_facts_concept_separates_flows_from_stocks():
+    """A quarter's revenue must never be read as a year's.
+
+    Filers report both spans under the same tag, so the period filter is the
+    only thing standing between a correct ratio and one that is four times
+    too small.
+    """
+    from merton.data.sec import facts_concept
+
+    blob = _blob("Revenues", "USD", [
+        {"start": "2023-01-01", "end": "2023-03-31", "filed": "2023-05-01", "val": 25},
+        {"start": "2022-07-01", "end": "2023-06-30", "filed": "2023-08-01", "val": 100},
+    ])
+    annual = facts_concept(blob, "Revenues", period="annual")
+    assert annual["val"].tolist() == [100]
+    assert facts_concept(blob, "Revenues", period="instant").empty
+
+
+def test_facts_concept_prefers_the_latest_filing_of_a_period():
+    """A restatement supersedes the original -- but only from its own filing date."""
+    from merton.data.sec import facts_concept
+
+    blob = _blob("Assets", "USD", [
+        {"end": "2023-03-31", "filed": "2023-05-01", "val": 100},
+        {"end": "2023-03-31", "filed": "2023-11-01", "val": 95},
+    ])
+    frame = facts_concept(blob, "Assets")
+    assert len(frame) == 1
+    assert frame["val"].iloc[0] == 95
+    assert frame["filed"].iloc[0] == pd.Timestamp("2023-11-01")
+
+
+def test_facts_concept_is_empty_for_an_untagged_concept():
+    from merton.data.sec import facts_concept
+
+    assert facts_concept(_blob("Assets", "USD", []), "Liabilities").empty
+    assert facts_concept(None, "Assets").empty
+    assert facts_concept({}, "Assets").empty
+
+
+def test_tag_ladder_takes_the_first_tag_that_reports():
+    from merton.data.sec import first_available_in
+
+    blob = {"facts": {"us-gaap": {
+        "LongTermDebt": {"units": {"USD": [
+            {"end": "2023-03-31", "filed": "2023-05-01", "val": 50}]}},
+    }}}
+    frame, tag = first_available_in(
+        blob, ["LongTermDebtNoncurrent", "LongTermDebt", "LongTermNotesPayable"])
+    assert tag == "LongTermDebt"
+    assert frame["val"].tolist() == [50]
+
+
+def test_tag_ladder_reports_nothing_when_no_tag_hits():
+    from merton.data.sec import first_available_in
+
+    frame, tag = first_available_in({"facts": {}}, ["Assets", "Liabilities"])
+    assert tag is None
+    assert frame.empty
+
+
+def test_tag_ladder_crosses_taxonomies():
+    """Shares outstanding live in the dei taxonomy, not us-gaap."""
+    from merton.data.sec import first_available_in
+
+    blob = _blob("EntityCommonStockSharesOutstanding", "shares",
+                 [{"end": "2023-03-31", "filed": "2023-05-01", "val": 1000}],
+                 taxonomy="dei")
+    frame, tag = first_available_in(
+        blob, [("dei", "EntityCommonStockSharesOutstanding")])
+    assert tag == "EntityCommonStockSharesOutstanding"
+    assert frame["val"].tolist() == [1000]

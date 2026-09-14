@@ -51,6 +51,9 @@ def bootstrap_auc(panel: pd.DataFrame, score: str, label: str = LABEL,
     does not have. Clustering the bootstrap on the firm is the honest version.
     """
     frame = panel[[score, label, "cik"]].replace([np.inf, -np.inf], np.nan).dropna()
+    if frame.empty or frame[label].nunique() < 2:
+        return float("nan"), float("nan")
+
     rng = np.random.default_rng(seed)
     firms = frame["cik"].unique()
     by_firm = {cik: part for cik, part in frame.groupby("cik")}
@@ -76,29 +79,40 @@ def roc_points(panel: pd.DataFrame, score: str, label: str = LABEL,
 
 def score_comparison(panel: pd.DataFrame, scores: dict[str, bool],
                      label: str = LABEL, n_boot: int = 300) -> pd.DataFrame:
-    """AUC table across competing scores, on the rows where all of them exist.
+    """AUC table across competing scores, reported two ways.
 
-    Restricting to the common sample matters: a score that is only available
-    for large, healthy filers would otherwise look good by dint of a friendlier
-    sample rather than better discrimination.
+    ``auc`` is each score on every row where that score exists. ``auc_common``
+    restricts all scores to the rows where *all* of them exist, which is the
+    only way to compare them fairly -- a score available only for large, well
+    tagged filers would otherwise look good by dint of a friendlier sample
+    rather than better discrimination. Both are shown because the common
+    sample can be much smaller, and a comparison drawn on a handful of
+    defaults deserves to be seen as such.
     """
     columns = list(scores) + [label, "cik"]
     common = panel[columns].replace([np.inf, -np.inf], np.nan).dropna()
+    has_common = len(common) > 0 and common[label].nunique() > 1
 
     rows = []
     for name, higher_is_safer in scores.items():
-        lo, hi = bootstrap_auc(common, name, label, higher_is_safer, n_boot=n_boot)
+        own = panel[[name, label, "cik"]].replace([np.inf, -np.inf], np.nan).dropna()
+        lo, hi = bootstrap_auc(own, name, label, higher_is_safer, n_boot=n_boot)
         rows.append({
             "score": name,
-            "auc": auc(common, name, label, higher_is_safer),
+            "auc": auc(own, name, label, higher_is_safer),
             "ci_low": lo,
             "ci_high": hi,
-            "accuracy_ratio": accuracy_ratio(common, name, label=label,
+            "accuracy_ratio": accuracy_ratio(own, name, label=label,
                                              higher_is_safer=higher_is_safer),
+            "n": len(own),
+            "n_defaults": int(own[label].sum()),
+            "auc_common": (auc(common, name, label, higher_is_safer)
+                           if has_common else float("nan")),
         })
+
     out = pd.DataFrame(rows).sort_values("auc", ascending=False).reset_index(drop=True)
     out.attrs["n_obs"] = len(common)
-    out.attrs["n_defaults"] = int(common[label].sum())
+    out.attrs["n_defaults"] = int(common[label].sum()) if len(common) else 0
     return out
 
 

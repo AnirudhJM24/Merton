@@ -96,14 +96,29 @@ def test_decile_table_is_monotone_for_a_real_signal():
     assert table["n"].sum() == 200 * 24
 
 
-def test_score_comparison_uses_a_common_sample():
-    """Scores must be compared on identical rows, or the sample does the work."""
+def test_score_comparison_reports_own_and_common_samples():
+    """Scores must also be comparable on identical rows, or the sample does the work."""
     panel = synthetic_panel(signal=1.0)
     panel.loc[panel.index[:500], "altman_z"] = np.nan
     table = score_comparison(panel, {"dd": True, "altman_z": True}, n_boot=40)
+
     assert table.attrs["n_obs"] == len(panel) - 500
     assert set(table["score"]) == {"dd", "altman_z"}
     assert table["auc"].iloc[0] >= table["auc"].iloc[1]
+
+    # dd exists on every row; altman_z only on the rows that survived.
+    by_score = table.set_index("score")
+    assert by_score.loc["dd", "n"] == len(panel)
+    assert by_score.loc["altman_z", "n"] == len(panel) - 500
+    assert by_score["auc_common"].notna().all()
+
+
+def test_score_comparison_survives_an_empty_common_sample():
+    """A score with no overlap must not turn the whole table into NaN."""
+    panel = synthetic_panel(signal=1.0)
+    panel["sparse"] = np.nan
+    table = score_comparison(panel, {"dd": True, "sparse": True}, n_boot=20)
+    assert table.loc[table["score"] == "dd", "auc"].iloc[0] > 0.8
 
 
 def test_logistic_benchmark_splits_by_firm():

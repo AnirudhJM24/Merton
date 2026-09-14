@@ -1,8 +1,8 @@
 """Does the model move when the credit market moves?
 
 A cross-sectional ranking can look fine while the model is blind to the credit
-cycle. Aggregating the panel month by month and setting it against the ICE
-BofA index spreads tests the other axis: when the market repriced credit in
+cycle. Aggregating the panel month by month and setting it against traded
+corporate spreads tests the other axis: when the market repriced credit in
 March 2020, did model-implied risk move with it, and by how much?
 """
 
@@ -14,6 +14,9 @@ import pandas as pd
 from merton.data.rates import credit_spread_benchmarks
 
 DISTRESS_DD = 2.0      # a conventional "within two standard deviations" cut
+
+# Market yardsticks the model aggregates get compared against.
+BENCHMARKS = ("baa_spread", "aaa_spread", "baa_aaa")
 
 
 def aggregate_by_month(panel: pd.DataFrame) -> pd.DataFrame:
@@ -33,7 +36,7 @@ def aggregate_by_month(panel: pd.DataFrame) -> pd.DataFrame:
 
 
 def with_market_spreads(monthly: pd.DataFrame) -> pd.DataFrame:
-    """Attach month-end ICE BofA high-yield and BBB option-adjusted spreads."""
+    """Attach month-end Moody's corporate spreads over the 10-year Treasury."""
     benchmarks = credit_spread_benchmarks().resample("ME").last()
     return monthly.join(benchmarks, how="left")
 
@@ -48,7 +51,7 @@ def cycle_correlations(monthly: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in ("median_dd", "p10_dd", "share_distressed", "median_spread",
                         "mean_asset_vol") if c in monthly]
     rows = []
-    for benchmark in ("hy_oas", "bbb_oas"):
+    for benchmark in BENCHMARKS:
         if benchmark not in monthly:
             continue
         frame = monthly[cols + [benchmark]].dropna()
@@ -78,7 +81,7 @@ def spread_gap(panel: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
     investment-grade names is a multiple, not a constant number of basis points.
     """
     frame = monthly.dropna(subset=["median_spread"]).copy()
-    for benchmark in ("hy_oas", "bbb_oas"):
+    for benchmark in BENCHMARKS:
         if benchmark in frame:
             frame[f"gap_{benchmark}_bp"] = 1e4 * (frame[benchmark] - frame["median_spread"])
             frame[f"ratio_{benchmark}"] = frame[benchmark] / frame["median_spread"].replace(0, np.nan)

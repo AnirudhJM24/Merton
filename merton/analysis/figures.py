@@ -165,7 +165,7 @@ def event_study_figure(panel: pd.DataFrame, out: Path, max_months: int = 36) -> 
 
 
 def credit_cycle_figure(monthly: pd.DataFrame, out: Path) -> Path:
-    """Model-implied distress against traded high-yield spreads.
+    """Model-implied distress against traded corporate spreads.
 
     Two panels rather than two y-axes. The measures live on different scales,
     and overlaying them on a shared axis would let the choice of scaling decide
@@ -180,10 +180,10 @@ def credit_cycle_figure(monthly: pd.DataFrame, out: Path) -> Path:
     _style(top, "Model: share of firms within two standard deviations of default",
            "", "Share of firms (%)")
 
-    if "hy_oas" in frame:
-        market = frame.dropna(subset=["hy_oas"])
-        bottom.plot(market.index, 1e4 * market["hy_oas"], color=SERIES[1], linewidth=2)
-    _style(bottom, "Market: ICE BofA US high-yield option-adjusted spread",
+    if "baa_spread" in frame:
+        market = frame.dropna(subset=["baa_spread"])
+        bottom.plot(market.index, 1e4 * market["baa_spread"], color=SERIES[1], linewidth=2)
+    _style(bottom, "Market: Moody's Baa corporate yield over the 10-year Treasury",
            "", "Spread (bp)")
 
     return _save(fig, out)

@@ -29,7 +29,7 @@ from merton.data.rates import risk_free_curve
 
 log = logging.getLogger(__name__)
 
-DEFAULT_START = "2015-01-31"
+DEFAULT_START = "2016-09-30"   # the price source serves ten years; earlier months would carry no equity data
 DEFAULT_HORIZON_MONTHS = 12
 
 # Size ranking is taken from several historical dates rather than just the
@@ -37,16 +37,21 @@ DEFAULT_HORIZON_MONTHS = 12
 FRAME_PERIODS = ["CY2016Q4I", "CY2019Q4I", "CY2022Q4I", "CY2025Q2I"]
 
 
+MIN_ASSETS = 5e7    # $50m: below this a filer is usually a shell or pre-revenue
+
+
 def select_universe(n_candidates: int = 2500, periods: list[str] | None = None) -> pd.DataFrame:
-    """Largest US filers by total assets, with tickers attached.
+    """US filers ranked by total assets, with tickers attached where known.
 
     The XBRL ``frames`` API returns one concept across every filer at once, so
     the whole ranking costs a handful of requests rather than one per firm.
 
-    This is a *candidate* pool: banks and insurers cannot be filtered out here
-    because SIC codes are not in the frames payload, and they make up a large
-    share of the top of an assets ranking. The caller walks the pool in size
-    order and stops once it has enough non-financial firms.
+    This is a *candidate* pool, and it deliberately reaches well down the size
+    distribution. Ranking by assets and stopping at the top few hundred yields
+    a universe of mega-caps, which almost never default -- a default study
+    built on it has nothing to predict. Banks and insurers cannot be filtered
+    here because SIC codes are not in the frames payload; the caller drops them
+    as it walks the pool.
     """
     periods = periods or FRAME_PERIODS
     assets: dict[int, float] = {}
@@ -70,6 +75,7 @@ def select_universe(n_candidates: int = 2500, periods: list[str] | None = None) 
 
     ranked = (pd.Series(assets, name="assets").rename_axis("cik")
               .sort_values(ascending=False).reset_index())
+    ranked = ranked[ranked["assets"] >= MIN_ASSETS]
     ranked["frames_name"] = ranked["cik"].map(names)
 
     # Left join, not inner: a filer missing from SEC's ticker file is usually a
@@ -116,29 +122,43 @@ def firm_profile(cik: int, start: str = DEFAULT_START,
     return profile
 
 
-def _pit(cik, tags, dates, period="instant"):
+def _pit(blob, tags, dates, period="instant"):
     """Point-in-time series for a tag ladder, plus the tag that supplied it."""
-    facts, tag = sec.first_available(cik, tags, period=period)
+    facts, tag = sec.first_available_in(blob, tags, period=period)
     return sec.as_of(facts, dates), tag
 
 
 def firm_fundamentals(cik: int, dates: pd.DatetimeIndex) -> pd.DataFrame:
-    """Point-in-time balance-sheet and income-statement inputs for one filer."""
+    """Point-in-time balance-sheet and income-statement inputs for one filer.
+
+    The whole fact set is fetched once and every tag ladder is resolved against
+    it locally, so a firm costs one request no matter how many tags are tried.
+    """
+    blob = sec.company_facts(cik)
     out = pd.DataFrame(index=dates)
     tags_used = {}
 
-    short_term, tags_used["debt_st"] = _pit(cik, sec.SHORT_TERM_DEBT_TAGS, dates)
-    long_term, tags_used["debt_lt"] = _pit(cik, sec.LONG_TERM_DEBT_TAGS, dates)
+    short_term, tags_used["debt_st"] = _pit(blob, sec.SHORT_TERM_DEBT_TAGS, dates)
+    long_term, tags_used["debt_lt"] = _pit(blob, sec.LONG_TERM_DEBT_TAGS, dates)
+    # A firm reporting only long-term debt genuinely has no current portion
+    # tagged; treating that as zero is right. A firm reporting neither is
+    # unusable, and falls out below when D is required to be positive.
     out["debt_st"] = short_term.fillna(0.0) if long_term.notna().any() else short_term
     out["debt_lt"] = long_term
 
     for field, tags in sec.BALANCE_SHEET_TAGS.items():
-        out[field], tags_used[field] = _pit(cik, tags, dates)
+        out[field], tags_used[field] = _pit(blob, tags, dates)
     for field, tags in sec.FLOW_TAGS.items():
-        out[field], tags_used[field] = _pit(cik, tags, dates, period="annual")
+        out[field], tags_used[field] = _pit(blob, tags, dates, period="annual")
 
-    shares, tags_used["shares"] = _pit(cik, sec.SHARES_TAGS, dates)
+    shares, tags_used["shares"] = _pit(blob, sec.SHARES_TAGS, dates)
     out["shares"] = shares
+
+    # Total liabilities is frequently untagged even when both sides of the
+    # balance sheet are. Falling back to the identity keeps the firm rather
+    # than dropping it from every accounting-based comparison.
+    derived = out["liabilities_and_equity"].fillna(out["assets"]) - out["equity"]
+    out["liabilities"] = out["liabilities"].fillna(derived)
 
     out.attrs["tags_used"] = tags_used
     return out

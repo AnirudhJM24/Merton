@@ -165,7 +165,7 @@ def main() -> None:
         "",
         "Model-implied spread against traded index spreads, selected months:",
         "",
-        md_table(gaps[["median_spread", "hy_oas", "bbb_oas", "ratio_bbb_oas"]]
+        md_table(gaps[["median_spread", "baa_spread", "aaa_spread", "ratio_baa_spread"]]
                  .dropna().iloc[::12].reset_index()
                  .rename(columns={"date": "month"}), "{:.4f}"),
         "",

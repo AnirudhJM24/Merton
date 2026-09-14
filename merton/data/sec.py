@@ -27,6 +27,7 @@ TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 SUBMISSIONS_PAGE = "https://data.sec.gov/submissions/{name}"
 CONCEPT_URL = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik:010d}/{taxonomy}/{tag}.json"
+FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 FRAMES_URL = "https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/USD/{period}.json"
 
 BANKRUPTCY_ITEM = "1.03"   # 8-K Item 1.03 -- Bankruptcy or Receivership
@@ -60,14 +61,24 @@ BALANCE_SHEET_TAGS = {
     "current_assets": ["AssetsCurrent"],
     "current_liabilities": ["LiabilitiesCurrent"],
     "retained_earnings": ["RetainedEarningsAccumulatedDeficit"],
+    # Many filers never tag total liabilities directly; these two allow it to
+    # be derived from the balance-sheet identity instead of dropping the firm.
+    "liabilities_and_equity": ["LiabilitiesAndStockholdersEquity"],
+    "equity": ["StockholdersEquity",
+               "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
 }
 
 # Income-statement items, reported over a period rather than at an instant.
 FLOW_TAGS = {
     "ebit": ["OperatingIncomeLoss",
-             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"],
+             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+             "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"],
     "revenue": ["RevenueFromContractWithCustomerExcludingAssessedTax",
-                "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerIncludingAssessedTax"],
+                "Revenues",
+                "RevenueFromContractWithCustomerIncludingAssessedTax",
+                "SalesRevenueNet",
+                "SalesRevenueGoodsNet",
+                "SalesRevenueServicesNet"],
 }
 SHARES_TAGS = [("dei", "EntityCommonStockSharesOutstanding"),
                ("dei", "EntityCommonStockholdersEquitySharesOutstanding")]
@@ -147,6 +158,74 @@ def bankruptcy_date(sub: dict) -> pd.Timestamp | None:
     return None if hits.empty else hits.min()
 
 
+def company_facts(cik: int) -> dict | None:
+    """Every XBRL fact a filer has reported, in one request.
+
+    The per-concept endpoint needs a round trip per tag, and the tag ladders
+    here try a dozen or more per firm -- most of which 404, because filers tag
+    the same line item differently. Pulling the whole fact set once and
+    resolving the ladders locally turns roughly twenty requests per firm into
+    one, which is the difference between a build that takes hours and one that
+    takes minutes.
+    """
+    return session().get(FACTS_URL.format(cik=cik), sec=True)
+
+
+def _facts_to_frame(units: dict, tag: str, period: str) -> pd.DataFrame:
+    """Shared normalization for both the per-concept and whole-firm paths."""
+    empty = pd.DataFrame(columns=["end", "filed", "val"])
+    key = "USD" if "USD" in units else ("shares" if "shares" in units else None)
+    if key is None:
+        return empty
+
+    frame = pd.DataFrame(units[key])
+    if not {"end", "filed", "val"}.issubset(frame.columns):
+        return empty
+
+    has_start = "start" in frame.columns and frame["start"].notna().any()
+    if period == "instant":
+        if has_start:
+            frame = frame[frame["start"].isna()]
+    else:
+        if not has_start:
+            return empty
+        span = (pd.to_datetime(frame["end"], errors="coerce")
+                - pd.to_datetime(frame["start"], errors="coerce")).dt.days
+        frame = frame[span.between(330, 400)]   # trailing-year facts only
+
+    frame = frame.copy()
+    frame["end"] = pd.to_datetime(frame["end"], errors="coerce")
+    frame["filed"] = pd.to_datetime(frame["filed"], errors="coerce")
+    frame = frame.dropna(subset=["end", "filed", "val"])
+    if frame.empty:
+        return empty
+
+    # One row per period end, keeping the latest filing of it: a restatement
+    # supersedes the original, but only from the date it was itself filed.
+    frame = frame.sort_values(["end", "filed"]).drop_duplicates("end", keep="last")
+    return frame[["end", "filed", "val"]].sort_values("filed").reset_index(drop=True)
+
+
+def facts_concept(blob: dict, tag: str, taxonomy: str = "us-gaap",
+                  period: str = "instant") -> pd.DataFrame:
+    """Pull one concept out of an already-fetched companyfacts blob."""
+    units = ((blob or {}).get("facts", {}).get(taxonomy, {}).get(tag, {}) or {}).get("units")
+    if not units:
+        return pd.DataFrame(columns=["end", "filed", "val"])
+    return _facts_to_frame(units, tag, period)
+
+
+def first_available_in(blob: dict, tags: list, taxonomy: str = "us-gaap",
+                       period: str = "instant"):
+    """Walk a tag ladder against a companyfacts blob, most specific first."""
+    for tag in tags:
+        tax, name = tag if isinstance(tag, tuple) else (taxonomy, tag)
+        frame = facts_concept(blob, name, tax, period)
+        if not frame.empty:
+            return frame, name
+    return pd.DataFrame(columns=["end", "filed", "val"]), None
+
+
 def concept_facts(cik: int, tag: str, taxonomy: str = "us-gaap",
                   period: str = "instant") -> pd.DataFrame:
     """One XBRL concept for one filer, as (period_end, filed, value).
@@ -157,43 +236,13 @@ def concept_facts(cik: int, tag: str, taxonomy: str = "us-gaap",
     never compared against a year's. Mixing the two would silently corrupt
     every ratio built on them.
 
-    Returns an empty frame when the filer does not report the tag, which is the
-    normal case for most tag/filer pairs.
+    This is the single-concept endpoint, kept for ad-hoc lookups; the panel
+    build goes through :func:`company_facts` instead.
     """
     body = session().get(CONCEPT_URL.format(cik=cik, taxonomy=taxonomy, tag=tag), sec=True)
     if not body or "units" not in body:
         return pd.DataFrame(columns=["end", "filed", "val"])
-
-    units = body["units"]
-    key = "USD" if "USD" in units else ("shares" if "shares" in units else None)
-    if key is None:
-        return pd.DataFrame(columns=["end", "filed", "val"])
-
-    frame = pd.DataFrame(units[key])
-    if not {"end", "filed", "val"}.issubset(frame.columns):
-        return pd.DataFrame(columns=["end", "filed", "val"])
-
-    has_start = "start" in frame.columns and frame["start"].notna().any()
-    if period == "instant":
-        if has_start:
-            frame = frame[frame["start"].isna()]
-    else:
-        if not has_start:
-            return pd.DataFrame(columns=["end", "filed", "val"])
-        span = (pd.to_datetime(frame["end"], errors="coerce")
-                - pd.to_datetime(frame["start"], errors="coerce")).dt.days
-        frame = frame[span.between(330, 400)]   # trailing-year facts only
-
-    frame = frame.copy()
-    frame["end"] = pd.to_datetime(frame["end"], errors="coerce")
-    frame["filed"] = pd.to_datetime(frame["filed"], errors="coerce")
-    frame = frame.dropna(subset=["end", "filed", "val"])
-    if frame.empty:
-        return pd.DataFrame(columns=["end", "filed", "val"])
-
-    # One row per period end, keeping the latest filing of it (restatements win).
-    frame = frame.sort_values(["end", "filed"]).drop_duplicates("end", keep="last")
-    return frame[["end", "filed", "val"]].sort_values("filed").reset_index(drop=True)
+    return _facts_to_frame(body["units"], tag, period)
 
 
 def first_available(cik: int, tags: list, taxonomy: str = "us-gaap",
